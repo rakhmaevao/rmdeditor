@@ -99,7 +99,14 @@ function decorate(state:EditorState):DecorationSet {
  }});
  return Decoration.set(ranges,true);
 }
-const live=StateField.define<DecorationSet>({create:decorate,update(value,tr){return tr.docChanged||tr.selection?decorate(tr.state):value;},provide:f=>EditorView.decorations.from(f)});
+const live=StateField.define<DecorationSet>({
+ create:decorate,
+ update(value,tr){
+  // Background parsing advances the tree without changing the document or cursor.
+  return tr.docChanged||tr.selection||syntaxTree(tr.startState)!==syntaxTree(tr.state)?decorate(tr.state):value;
+ },
+ provide:f=>EditorView.decorations.from(f),
+});
 let view:EditorView|undefined, version=0, pending=false, sent='', external=false;
 function flush(){if(!view||pending)return; const text=view.state.doc.toString();if(text===sent)return;pending=true;sent=text;api.postMessage({type:'edit',text,version});}
 window.addEventListener('message',({data})=>{

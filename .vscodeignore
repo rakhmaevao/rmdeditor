@@ -5,3 +5,7 @@ webview/**
 *.ts
 *.mjs
 tsconfig.json
+tests/**
+playwright.config.mjs
+test-results/**
+playwright-report/**

@@ -4,7 +4,7 @@
 
 ## Установка
 
-Установите `rmdeditor-0.1.3.vsix` через команду **Extensions: Install from VSIX**. Откройте `.md`, выполните **Reopen Editor With… → RMdEditor**. При желании выберите **Configure default editor** в этом меню.
+Установите `rmdeditor-0.1.4.vsix` через команду **Extensions: Install from VSIX**. Откройте `.md`, выполните **Reopen Editor With… → RMdEditor**. При желании выберите **Configure default editor** в этом меню.
 
 На активной строке видны маркеры Markdown; на остальных скрываются маркеры заголовков, выделений и кода. Mermaid в fenced-блоках отображается внутри документа. Нажмите диаграмму для редактирования; переведите курсор за пределы блока для рендера. Сохранение — обычное Ctrl+S. Есть история редактирования Ctrl+Z/Ctrl+Shift+Z.
 
@@ -14,6 +14,8 @@
 
 `npm ci`, `npm run check`, `npm run build`, затем F5 в VS Code. Упаковка: `npm run package`.
 
+Проверка Live Preview в браузере: `npx playwright install chromium`, затем `npm test`. Для установленного Chrome можно вместо загрузки Chromium выполнить `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/google-chrome npm test`. Тесты проверяют оформление после фонового разбора длинного документа и внешнего обновления текста.
+
 ## Границы прототипа
 
 - Это Live Preview, а не полный визуальный редактор: картинки, списки задач и wikilinks пока остаются текстом Markdown. Таблицы и блоки кода отображаются визуально, кнопка «Редактировать» открывает их исходный Markdown. Форматирование внутри ячеек пока показывается текстом.
@@ -21,7 +23,7 @@
 - Mermaid выполняется локально с securityLevel strict; внешние ресурсы webview запрещены.
 - Исходный Markdown не проходит преобразование через HTML: YAML и неизвестные конструкции сохраняются.
 - Одновременное редактирование того же файла извне может заменить локальное несинхронизированное изменение; избегайте параллельной правки одного файла.
-- Проверены сборка и типы. Интерактивное поведение в Extension Host требует ручной проверки.
+- Сборка, типы и обновление Live Preview проверяются автоматически. Интерактивное поведение в Extension Host требует ручной проверки.
 
 Архитектура использует [VS Code Custom Text Editor API](https://code.visualstudio.com/api/extension-guides/custom-editors), CodeMirror 6 и Mermaid.
 
