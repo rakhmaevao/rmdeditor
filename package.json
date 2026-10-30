@@ -1,0 +1,55 @@
+{
+  "name": "rmdeditor",
+  "displayName": "RMdEditor",
+  "description": "Obsidian-style Markdown live editing with Mermaid",
+  "version": "0.1.3",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "tsc --noEmit",
+    "package": "npm run build && vsce package --allow-missing-repository"
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "rmdeditor.live",
+        "displayName": "RMdEditor",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          },
+          {
+            "filenamePattern": "*.markdown"
+          }
+        ],
+        "priority": "option"
+      }
+    ]
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/common": "^1.5.4",
+    "@lezer/markdown": "^1.8.1",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.1.2",
+    "mermaid": "^12.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
