@@ -2,7 +2,7 @@
   "name": "rmdeditor",
   "displayName": "RMdEditor",
   "description": "Obsidian-style Markdown live editing with Mermaid",
-  "version": "0.1.4",
+  "version": "0.1.11",
   "publisher": "local",
   "engines": {
     "vscode": "^1.95.0"
@@ -52,6 +52,7 @@
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^4.1.0",
     "esbuild": "^0.28.2",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vscode-uri": "^3.2.0"
   }
 }

@@ -1,16 +1,42 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import {randomBytes} from 'node:crypto';
+import {marked} from 'marked';
 export function activate(context: vscode.ExtensionContext) {
  context.subscriptions.push(vscode.window.registerCustomEditorProvider('rmdeditor.live', {
   async resolveCustomTextEditor(document, panel) {
    const web = panel.webview;
-   web.options = {enableScripts:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'dist')]};
+   const documentDirectory=vscode.Uri.joinPath(document.uri,'..');
+   web.options = {enableScripts:true,localResourceRoots:[vscode.Uri.joinPath(context.extensionUri,'dist'),documentDirectory,...(vscode.workspace.workspaceFolders??[]).map(folder=>folder.uri)]};
    const nonce = randomBytes(18).toString('hex');
    const script = web.asWebviewUri(vscode.Uri.joinPath(context.extensionUri,'dist/editor.js'));
-   web.html = `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data:; font-src ${web.cspSource};"></head><body><div id="editor"></div><script nonce="${nonce}" src="${script}"></script></body></html>`;
+   const fontConfiguration=()=>{const config=vscode.workspace.getConfiguration('editor');return{fontFamily:String(config.get('fontFamily')||''),fontSize:Number(config.get('fontSize')||14)};};
+   const attribute=(value:string)=>value.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+   const fontVars=(font:{fontFamily:string,fontSize:number})=>`--rmd-font-size:${font.fontSize}px${font.fontFamily?`;--rmd-font-family:${attribute(font.fontFamily)}`:''}`;
+   web.html = `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src ${web.cspSource} https: http: data:; font-src ${web.cspSource};"></head><body style="${fontVars(fontConfiguration())}"><div id="editor"></div><script nonce="${nonce}" src="${script}"></script></body></html>`;
    let applying = false;
-   const send = () => web.postMessage({type:'document',text:document.getText(),version:document.version});
+   const imageSources=(text:string)=>{
+    const sources:Record<string,string>=Object.create(null);
+    marked.walkTokens(marked.lexer(text),token=>{
+     if(token.type!=='image')return;
+     const href=token.href;
+     if(/^(https?:|data:image\/)/i.test(href)){sources[href]=href;return;}
+     if(/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//'))return;
+     try {
+      // A bare relative URI defaults to file: in VS Code and gains a leading
+      // slash. Use a neutral scheme so relative paths remain relative.
+      const relative=vscode.Uri.parse(`markdown-image:${href}`);
+      const file=relative.path.startsWith('/')?documentDirectory.with({path:relative.path}):vscode.Uri.joinPath(documentDirectory,relative.path);
+      const target=file.with({query:relative.query,fragment:relative.fragment});
+      sources[href]=web.asWebviewUri(target).toString();
+     }catch{/* Keep malformed paths visible as an unavailable image. */}
+    });
+    return sources;
+   };
+   const send = () => {
+    const text=document.getText();
+    return web.postMessage({type:'document',text,version:document.version,imageSources:imageSources(text)});
+   };
    let queue = Promise.resolve();
    const messages = web.onDidReceiveMessage(message => {
     if(message.type === 'ready') { void send(); return; }
@@ -41,11 +67,15 @@ export function activate(context: vscode.ExtensionContext) {
      edit.replace(document.uri,new vscode.Range(0,0,document.lineCount,0),message.text);
      applying = true;
      try { await vscode.workspace.applyEdit(edit); } finally { applying = false; }
-     await web.postMessage({type:'ack',version:document.version});
+     await web.postMessage({type:'ack',version:document.version,imageSources:imageSources(document.getText())});
     }).catch(error => { void vscode.window.showErrorMessage(String(error)); void send(); });
    });
    const changes = vscode.workspace.onDidChangeTextDocument(e => {if(e.document.uri.toString()===document.uri.toString() && !applying) void send();});
-   panel.onDidDispose(() => {messages.dispose();changes.dispose();});
+   const fonts = vscode.workspace.onDidChangeConfiguration(e=>{
+    if(!e.affectsConfiguration('editor.fontFamily') && !e.affectsConfiguration('editor.fontSize'))return;
+    void web.postMessage({type:'font',...fontConfiguration()});
+   });
+   panel.onDidDispose(() => {messages.dispose();changes.dispose();fonts.dispose();});
   }
  },{supportsMultipleEditorsPerDocument:false}));
 }
