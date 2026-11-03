@@ -1,26 +1,6 @@
 import {test,expect} from '@playwright/test';
-import {build} from 'esbuild';
+import {openEditor} from './harness.mjs';
 
-// Run the actual webview with a VS Code message bridge and access to its view.
-const bundle=await build({
- stdin:{contents:`
-  import './webview/editor.ts';
-  import {EditorView} from '@codemirror/view';
-  import {syntaxTree} from '@codemirror/language';
-  window.editorView=()=>EditorView.findFromDOM(document.querySelector('.cm-editor'));
-  window.previewState=()=>{
-   const view=window.editorView(),decorations=[];
-   for(const set of view.state.facet(EditorView.decorations)) {
-    if(typeof set!=='function') set.between(0,view.state.doc.length,(from,to,value)=>{
-     decorations.push({from,to,class:value.spec.class,kind:value.spec.widget?.kind,diagram:typeof value.spec.widget?.code==='string'});
-    });
-   }
-   return {text:view.state.doc.toString(),selection:view.state.selection.main.anchor,parsed:syntaxTree(view.state).length,decorations};
-  };
- `,resolveDir:process.cwd()},
- bundle:true,platform:'browser',format:'iife',write:false,
-});
-const script=bundle.outputFiles[0].text;
 const doc='# Document\n\n'+('A paragraph before the later sections. '.repeat(10)+'\n\n').repeat(12)+`
 ##### Later heading
 
@@ -48,19 +28,6 @@ p = plot([1, 2], [3, 4])
 | item   | 1     |
 `;
 
-async function openEditor(page,text,imageSources={}){
- await page.setContent('<div id="editor"></div>');
- await page.evaluate(({text,imageSources})=>{
-  window.messages=[];
-  window.acquireVsCodeApi=()=>({postMessage(message){
-   window.messages.push(message);
-   if(message.type==='ready') window.postMessage({type:'document',text,version:1,imageSources},'*');
-  }});
- },{text,imageSources});
- await page.addScriptTag({content:script});
- await expect(page.locator('.cm-editor')).toHaveCount(1);
-}
-
 async function expectFullPreview(page,text){
  await expect.poll(()=>page.evaluate(()=>window.previewState().parsed)).toBe(text.length);
  await expect.poll(()=>page.evaluate(()=>window.previewState().decorations.map(d=>d.class).filter(Boolean))).toContain('h5');
@@ -69,19 +36,24 @@ async function expectFullPreview(page,text){
  expect(state.selection).toBe(0);
  expect(state.decorations.some(d=>d.class==='h6')).toBe(true);
  expect(state.decorations.some(d=>d.diagram)).toBe(true);
- expect(state.decorations.some(d=>d.kind==='code')).toBe(true);
- expect(state.decorations.some(d=>d.kind==='table')).toBe(true);
+ expect(state.decorations.some(d=>d.class==='code-source')).toBe(true);
+ expect(state.decorations.some(d=>d.table)).toBe(true);
  expect(await page.evaluate(()=>window.messages.filter(m=>m.type==='edit'))).toEqual([]);
- await page.evaluate(()=>{
+ await page.evaluate(text=>{
   const view=window.editorView();
-  // Scroll without moving the cursor or editing the document.
-  window.scrollTo(0,document.body.scrollHeight);
-  view.requestMeasure();
- });
+  // Scroll without moving the cursor or editing the document: CodeMirror
+  // renders only the visible viewport, so bring each checked area into it.
+  view.dispatch({effects:window.EditorView.scrollIntoView(text.indexOf('Later heading'),{y:'center'})});
+ },text);
  await expect(page.locator('.h5')).toHaveText('Later heading');
  await expect(page.locator('.h6')).toHaveText('Deeper heading');
  await expect(page.locator('.diagram svg')).toHaveCount(1);
- await expect(page.locator('.syntax-code')).toContainText('p = plot');
+ await page.evaluate(text=>{
+  const view=window.editorView();
+  view.dispatch({effects:window.EditorView.scrollIntoView(text.indexOf('| item'),{y:'center'})});
+ },text);
+ await expect(page.locator('.cm-line').filter({hasText:'p = plot'})).toBeVisible();
+ await expect(page.locator('.rendered-block')).toHaveCount(1);
  await expect(page.locator('.rendered-block table')).toContainText('item');
 }
 
@@ -109,6 +81,20 @@ test('arrows enter code blocks and shift selects the adjacent source line',async
  expect(await page.evaluate(()=>{const s=window.editorView().state.selection.main;return {anchor:s.anchor,head:s.head};})).toEqual({anchor:14,head:20});
 });
 
+test('ATX heading marks hide together with the separator spaces',async({page})=>{
+ const text='#### Контекст\n\n####   Три пробела\n\nBody';
+ await openEditor(page,text);
+ // The cursor starts on the first heading, so it shows its source; park it on
+ // the last line to render both headings.
+ await page.evaluate(()=>window.editorView().dispatch({selection:{anchor:window.editorView().state.doc.length}}));
+ await expect(page.locator('.h4')).toHaveText(['Контекст','Три пробела']);
+ await expect.poll(()=>page.evaluate(()=>window.previewState().decorations.filter(d=>d.to>d.from).map(d=>[d.from,d.to]))).toEqual([[0,5],[15,22]]);
+ // Clicking a rendered heading brings the source back for editing.
+ await page.locator('.h4').first().click();
+ await expect(page.locator('.h4')).toHaveText(['#### Контекст','Три пробела']);
+ expect(await page.evaluate(()=>window.previewState().text)).toBe(text);
+});
+
 test('invalid Mermaid does not append error diagrams to the document',async({page})=>{
  await openEditor(page,'Before\n\n~~~mermaid\nsequenceDiagram\nJulia: plot()\n~~~\n');
  await expect(page.locator('.diagram')).toContainText('Ошибка Mermaid');
@@ -116,9 +102,8 @@ test('invalid Mermaid does not append error diagrams to the document',async({pag
  await expect(page.locator('svg')).toHaveCount(0);
 });
 
-test('mouse selects the code line under the pointer',async({page})=>{
+test('mouse edits inside an inactive code block like plain text',async({page})=>{
  await openEditor(page,'Before\n\n~~~js\nfirst\nsecond\nthird\n~~~\n\nAfter');
- await page.locator('.rendered-block button').click();
  const line=page.locator('.cm-line').filter({hasText:/^second$/});
  const box=await line.boundingBox();
  await page.mouse.dblclick(box.x+24,box.y+box.height/2);
@@ -129,7 +114,7 @@ test('line numbers render in the gutter and follow code block editing',async({pa
  await openEditor(page,'# One\n\ntext\n\n~~~js\na\nb\n~~~\n');
  await expect(page.locator('.cm-lineNumbers')).toBeVisible();
  await expect(page.locator('.cm-lineNumbers .cm-gutterElement:visible').first()).toHaveText('1');
- await page.locator('.rendered-block button').click();
+ await page.locator('.cm-line').filter({hasText:/^b$/}).click();
  await expect.poll(async()=>page.locator('.cm-lineNumbers .cm-gutterElement').allTextContents()).toContain('6');
 });
 
@@ -148,17 +133,19 @@ test('bare, angle and inline links are clickable',async({page})=>{
  expect(await page.evaluate(()=>window.previewState().text)).toBe(text);
 });
 
-test('clicking rendered code puts the cursor on the clicked source line',async({page})=>{
- const text='Intro\n\n~~~js\nalpha\nbeta\ngamma\ndelta\n~~~\n\nOutro';
+test('inactive code blocks stay as source with visible fences and keep editing native',async({page})=>{
+ const text='Intro\n\n~~~js\nalpha\nbeta\n~~~\n\nOutro';
  await openEditor(page,text);
- const pre=await page.locator('.rendered-block pre').boundingBox();
- await page.mouse.click(pre.x+pre.width/2,pre.y+pre.height*0.7);
- expect(await page.evaluate(()=>window.editorView().state.selection.main.head)).toBe(text.indexOf('gamma'));
- await expect(page.locator('.cm-line.code-source').first()).toBeVisible();
+ await page.evaluate(()=>window.editorView().dispatch({selection:{anchor:0}}));
+ await expect(page.locator('.code-fence').first()).toHaveText('~~~js');
+ await expect(page.locator('.code-fence').last()).toHaveText('~~~');
+ await expect(page.locator('.cm-line.code-source')).toHaveCount(4);
+ await expect(page.locator('.rendered-block')).toHaveCount(0);
  const line=page.locator('.cm-line').filter({hasText:/^alpha$/});
  const box=await line.boundingBox();
  await page.mouse.click(box.x+20,box.y+box.height/2);
  expect(await page.evaluate(()=>window.editorView().state.doc.lineAt(window.editorView().state.selection.main.head).text)).toBe('alpha');
+ expect(await page.evaluate(()=>window.previewState().text)).toBe(text);
 });
 
 test('clicking text below rendered widgets selects the clicked line',async({page})=>{
@@ -167,7 +154,7 @@ test('clicking text below rendered widgets selects the clicked line',async({page
  await expect(page.locator('.rendered-block table')).toContainText('1');
  // Widget spacing must live inside the measured widget box, otherwise the
  // height map runs short and clicks below widgets land several lines low.
- expect(await page.locator('.rendered-block.code-box').evaluate(el=>parseFloat(getComputedStyle(el).marginTop))).toBe(0);
+ expect(await page.locator('.rendered-block').evaluate(el=>parseFloat(getComputedStyle(el).marginTop))).toBe(0);
  for(const probe of ['Before the widgets','After the code block','After the table']){
   const line=page.locator('.cm-content .cm-line').filter({hasText:probe}).first();
   const box=await line.boundingBox();
@@ -176,40 +163,56 @@ test('clicking text below rendered widgets selects the clicked line',async({page
  }
 });
 
-test('julia code is highlighted in preview and while editing on a sheet-colored block',async({page})=>{
+test('julia code is highlighted in the always-visible source without a sheet look',async({page})=>{
  const text='# T\n\n~~~julia\nfunction f(x)\n  return x^2  # note\nend\n~~~';
  await openEditor(page,text);
- await expect(page.locator('.rendered-block .hljs-keyword').first()).toHaveText('function');
- const style=await page.locator('.rendered-block.code-box').evaluate(el=>({background:getComputedStyle(el).backgroundColor,border:getComputedStyle(el).borderTopWidth}));
- expect(style.background).toBe('rgba(0, 0, 0, 0)');
- expect(style.border).toBe('1px');
- await page.locator('.rendered-block pre').click({position:{x:40,y:40}});
+ await page.evaluate(()=>window.editorView().dispatch({selection:{anchor:0}}));
  await expect(page.locator('.cm-line.code-source .hljs-keyword').first()).toHaveText('function');
  await expect(page.locator('.cm-line.code-source .hljs-comment').first()).toHaveText('# note');
+ const style=await page.locator('.cm-line.code-source').first().evaluate(el=>({background:getComputedStyle(el).backgroundColor,border:getComputedStyle(el).borderTopWidth}));
+ expect(style.background).toBe('rgba(0, 0, 0, 0)');
+ expect(style.border).toBe('0px');
  expect(await page.evaluate(()=>window.previewState().text)).toBe(text);
  expect(await page.evaluate(()=>window.messages.filter(m=>m.type==='edit'))).toEqual([]);
 });
 
-test('soft line breaks join paragraphs without changing Markdown or structural breaks',async({page})=>{
+test('a blank first line inside a code block does not shift highlight spans',async({page})=>{
+ // The HTML parser drops the leading newline of the block content, which used
+ // to shift every highlight.js span one character left.
+ const text='~~~julia\n\nplot_registry = Dict()\n\nend\n~~~';
+ await openEditor(page,text);
+ await page.evaluate(()=>window.editorView().dispatch({selection:{anchor:0}}));
+ await expect(page.locator('.cm-line.code-source .hljs-built_in')).toHaveText('Dict');
+ await expect(page.locator('.cm-line.code-source .hljs-keyword')).toHaveText('end');
+ const keywordLine=await page.locator('.cm-line.code-source').filter({hasText:'end'}).first().evaluate(el=>el.innerHTML);
+ expect(keywordLine).toBe('<span class="hljs-keyword">end</span>');
+});
+
+test('single line breaks stay visible line breaks without changing the Markdown',async({page})=>{
  const text='# Title\n\nFirst line\nsecond line\n\nNext paragraph\n\n- First item\n  continuation\n- Second item\n\n> Quoted line\n> continued quote\n\nHard break  \nstays here\\\nand here\n\n~~~txt\ncode one\ncode two\n~~~';
  await openEditor(page,text);
- await expect(page.locator('.cm-line').filter({hasText:/^First line second line$/})).toHaveCount(1);
- await expect(page.locator('.cm-line').filter({hasText:/^- First item continuation$/})).toHaveCount(1);
- await expect(page.locator('.cm-line').filter({hasText:/^\s*Quoted line continued quote$/})).toHaveCount(1);
- await expect(page.locator('.soft-break')).toHaveCount(3);
+ await expect(page.locator('.cm-line').filter({hasText:/^First line$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^second line$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^\s*continuation$/})).toHaveCount(1);
  await expect(page.locator('.cm-line').filter({hasText:/^- Second item$/})).toHaveCount(1);
- await expect(page.locator('.cm-line').filter({hasText:/^Next paragraph$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^\s*Quoted line$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^\s*continued quote$/})).toHaveCount(1);
  await expect(page.locator('.cm-line').filter({hasText:/^Hard break/})).toHaveText('Hard break  ');
- await expect(page.locator('.syntax-code')).toHaveText('code one\ncode two');
+ await expect(page.locator('.cm-line').filter({hasText:/^stays here/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^Next paragraph$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^code one$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^code two$/})).toHaveCount(1);
  expect(await page.evaluate(()=>window.previewState().text)).toBe(text);
  expect(await page.evaluate(()=>window.messages.filter(m=>m.type==='edit'))).toEqual([]);
 
- // Entering a joined paragraph exposes its original lines for normal editing.
- await page.locator('.cm-line').filter({hasText:/^First line second line$/}).click();
+ // Selecting the paragraph keeps the same lines on screen.
+ await page.locator('.cm-line').filter({hasText:/^First line$/}).click();
+ await page.evaluate(()=>{const view=window.editorView();const line=view.state.doc.line(3);view.dispatch({selection:{anchor:line.from,to:line.to}});});
  await expect(page.locator('.cm-line').filter({hasText:/^First line$/})).toHaveCount(1);
  await expect(page.locator('.cm-line').filter({hasText:/^second line$/})).toHaveCount(1);
  await page.evaluate(()=>window.editorView().dispatch({selection:{anchor:0}}));
- await expect(page.locator('.cm-line').filter({hasText:/^First line second line$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^First line$/})).toHaveCount(1);
+ await expect(page.locator('.cm-line').filter({hasText:/^second line$/})).toHaveCount(1);
 });
 
 test('paragraphs and balanced table columns use the available editor width',async({page})=>{
@@ -260,7 +263,7 @@ test('reference and inline images render, while code keeps image syntax literal'
  await openEditor(page,text,{'figures/test.png':imageData});
  await expect(page.locator('.markdown-image img')).toHaveCount(3);
  await expect(page.locator('.markdown-image img[alt="Reference"]')).toHaveAttribute('title','Plot');
- await expect(page.locator('.syntax-code')).toHaveText('![Code block](figures/test.png)');
+ await expect(page.locator('.cm-line').filter({hasText:'![Code block](figures/test.png)'})).toHaveCount(1);
  expect(await page.evaluate(()=>window.previewState().text)).toBe(text);
 });
 
